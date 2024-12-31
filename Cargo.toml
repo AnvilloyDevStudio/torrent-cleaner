@@ -1,0 +1,13 @@
+[package]
+name = "torrent-cleaner"
+version = "0.1.0"
+edition = "2021"
+description = "Torrent Cleaner commandline tool"
+authors = ["Ben Forge (BenCheung0422)"]
+
+[dependencies]
+anyhow = "1.0.95"
+bendy = "0.3.3"
+clap = { version = "4.5.23", features = ["cargo", "wrap_help"] }
+getset = "0.1.3"
+thiserror = "2.0.9"
