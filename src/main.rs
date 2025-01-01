@@ -97,7 +97,7 @@ fn main() -> anyhow::Result<()> {
             if meta.is_file() {
                 rm_size += meta.len();
             }
-            
+
             if meta.is_dir() {
                 if include_empty_dir && check_dir_kind_of_empty(entry.path()) {
                     empty_dirs.push(entry.path().to_owned());
@@ -126,7 +126,7 @@ fn main() -> anyhow::Result<()> {
                 new_size += entry.1;
             }
         }
-        
+
         if new_files.is_empty() && old_files.is_empty() && empty_dirs.is_empty() {
             println!("No matching entries found.");
             return Ok(());
@@ -153,20 +153,19 @@ fn main() -> anyhow::Result<()> {
     } else { // Delete files
         let files = old_files;
 
-        let mut progress_bar = None;
-        if files.is_empty() {
+        let progress = if files.is_empty() {
             println!("No matching entries found.");
             if !include_empty_dir {
                 println!("Aborted.");
                 return Ok(())
             }
-            
+
             let progress = ProgressBar::no_length();
             progress.set_style(ProgressStyle::default_spinner()
                 .tick_chars("|/-\\|/-\\ ")
                 .template("{prefix} [{elapsed_precise}] {spinner:.green}\n{msg}")?);
             progress.enable_steady_tick(Duration::from_millis(50));
-            progress_bar = Some(progress);
+            progress
         } else {
             println!("Existed files found:");
             for entry in &files {
@@ -175,10 +174,10 @@ fn main() -> anyhow::Result<()> {
                     false => "-f",
                 }), path_colored(entry));
             }
-    
+
             println!();
             println!("Remove files: {} ({})", Red.paint(BinaryBytes(rm_size)), files.len());
-    
+
             if !no_confirm {
                 match Confirm::new(format!("Delete the above {} files?", files.len()).as_str())
                     .with_default(true).prompt() {
@@ -191,28 +190,28 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-    
+
             let progress = ProgressBar::new(files.len() as u64);
             progress.set_style(ProgressStyle::default_bar()
                 .template("{prefix} [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%)\n{msg}")?);
             progress.set_prefix("Processing");
-            
+
             for entry in &files {
                 fs::remove_file(entry)?;
                 progress.set_message(truncate_message(
                     format!("Removed file: {}", entry.to_string_lossy())));
                 progress.inc(1);
             }
-            
-            progress_bar = Some(progress);
-        }
-        
-        let progress = progress_bar.unwrap();
-        
+
+            progress
+        };
+
         let mut count = files.len();
         if include_empty_dir {
             progress.set_prefix("Clearing dirs");
-            let mut empty_dirs = find_empty_dirs(dir);
+            let vec = find_empty_dirs(dir);
+            let mut empty_dirs = vec.iter().filter(|e| !dirs.contains(*e))
+                .collect::<Vec<&PathBuf>>();
             empty_dirs.sort();
             empty_dirs.reverse();
             for entry in &empty_dirs {
