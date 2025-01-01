@@ -153,7 +153,7 @@ fn main() -> anyhow::Result<()> {
     } else { // Delete files
         let files = old_files;
 
-        let mut progress = ProgressBar::no_length();
+        let mut progress_bar = None;
         if files.is_empty() {
             println!("No matching entries found.");
             if !include_empty_dir {
@@ -161,9 +161,12 @@ fn main() -> anyhow::Result<()> {
                 return Ok(())
             }
             
+            let progress = ProgressBar::no_length();
             progress.set_style(ProgressStyle::default_spinner()
                 .tick_chars("|/-\\|/-\\ ")
-                .template("{prefix} [{elapsed_precise}]\n{msg}")?);
+                .template("{prefix} [{elapsed_precise}] {spinner:.green}\n{msg}")?);
+            progress.enable_steady_tick(Duration::from_millis(50));
+            progress_bar = Some(progress);
         } else {
             println!("Existed files found:");
             for entry in &files {
@@ -189,7 +192,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
     
-            progress = ProgressBar::new(files.len() as u64);
+            let progress = ProgressBar::new(files.len() as u64);
             progress.set_style(ProgressStyle::default_bar()
                 .template("{prefix} [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%)\n{msg}")?);
             progress.set_prefix("Processing");
@@ -200,12 +203,18 @@ fn main() -> anyhow::Result<()> {
                     format!("Removed file: {}", entry.to_string_lossy())));
                 progress.inc(1);
             }
+            
+            progress_bar = Some(progress);
         }
+        
+        let progress = progress_bar.unwrap();
         
         let mut count = files.len();
         if include_empty_dir {
             progress.set_prefix("Clearing dirs");
-            let empty_dirs = find_empty_dirs(dir);
+            let mut empty_dirs = find_empty_dirs(dir);
+            empty_dirs.sort();
+            empty_dirs.reverse();
             for entry in &empty_dirs {
                 fs::remove_dir_all(entry)?;
                 progress.set_message(truncate_message(
