@@ -18,5 +18,5 @@ term-painter = "0.4.0"
 term_size = "0.3.2"
 unicode-truncate = "2.0.0"
 
-[target.'cfg(linux)'.dependencies]
+[target.'cfg(linux)'.build-dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
