@@ -11,41 +11,17 @@ pub mod torrent;
 use crate::torrent::parse_torrent;
 use anyhow::Context;
 use clap::{arg, command, value_parser, Arg, ArgAction, Command};
-use humansize::{format_size, BINARY};
-use indicatif::ProgressStyle;
+use indicatif::{BinaryBytes, ProgressBar, ProgressStyle};
 use inquire::Confirm;
 use path_clean::PathClean;
 use std::collections::HashMap;
 use std::path::{Display, Path, PathBuf};
-use std::{env, fmt, fs, io};
+use std::time::Duration;
+use std::{env, io, thread};
 use term_painter::Color::{Blue, Green, NotSet, Red};
 use term_painter::{Painted, ToStyle};
-use tracing::{info, info_span, Event, Subscriber};
-use tracing_indicatif::span_ext::IndicatifSpanExt;
-use tracing_indicatif::IndicatifLayer;
-use tracing_subscriber::fmt::format::Writer;
-use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::util::SubscriberInitExt;
+use unicode_truncate::UnicodeTruncateStr;
 use walkdir::WalkDir;
-
-struct OnlyMessageFormatter;
-
-impl<S, N> FormatEvent<S, N> for OnlyMessageFormatter where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-    N: for<'a> FormatFields<'a> + 'static,
-{
-    fn format_event(
-        &self,
-        ctx: &FmtContext<'_, S, N>,
-        mut writer: Writer<'_>,
-        event: &Event<'_>,
-    ) -> fmt::Result {
-        ctx.field_format().format_fields(writer.by_ref(), event)?;
-        writeln!(writer)
-    }
-}
 
 fn main() -> anyhow::Result<()> {
     let matches = command!()
@@ -68,17 +44,22 @@ fn main() -> anyhow::Result<()> {
             .about("Compare directory content changes instead"))
         .get_matches();
 
-    let indicatif_layer = IndicatifLayer::new();
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer()
-            .with_writer(indicatif_layer.get_stdout_writer())
-            .event_format(OnlyMessageFormatter))
-        .with(indicatif_layer)
-        .init();
-
     let path = absolute_path(matches.get_one::<PathBuf>("file").expect("required"))?;
     let dir = absolute_path(matches.get_one::<PathBuf>("dir").expect("required"))?;
-    let torrent = parse_torrent(path)?;
+
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(ProgressStyle::default_spinner()
+        .tick_chars("|/-\\")
+        .template("{spinner:.green} [{elapsed_precise}] {msg}")?);
+    spinner.set_message("Parsing...");
+    spinner.enable_steady_tick(Duration::from_millis(100));
+
+    let result = parse_torrent(path);
+    spinner.finish_and_clear();
+    drop(spinner);
+    let torrent = result?;
+    println!("Parsing completed.\n");
+
     let mut files = HashMap::new();
     if let Some(vec) = torrent.info.files {
         for f in vec.iter() {
@@ -123,53 +104,51 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        info!("File changes:");
+        println!("File changes:");
 
-        for entry in old_files {
-            info!("{}  {}", Red.paint(match entry.is_dir() {
+        for entry in &old_files {
+            println!("{}  {}", Red.paint(match entry.is_dir() {
                 true => "-d",
                 false => "-f",
             }), path_colored(&entry));
         }
 
         for entry in new_files.iter() {
-            info!("{}   {}", Green.paint("+"), path_colored(entry));
+            println!("{}   {}", Green.paint("+"), path_colored(entry));
         }
 
         println!();
-        info!("New files: {}", Green.paint(format_size(new_size, BINARY)));
-        info!("Remove files: {}", Red.paint(format_size(rm_size, BINARY)));
+        println!("New files: {} ({})", Green.paint(BinaryBytes(new_size)), new_files.len());
+        println!("Remove files: {} ({})", Red.paint(BinaryBytes(rm_size)), old_files.len());
     } else { // Delete files
         let files = old_files;
-        info!("Existed files found:");
+        println!("Existed files found:");
         for entry in &files {
-            info!("{}  {}", Red.paint(match entry.is_dir() {
+            println!("{}  {}", Red.paint(match entry.is_dir() {
                 true => "-d",
                 false => "-f",
             }), path_colored(entry));
         }
 
         println!();
-        info!("Remove files: {}", Red.paint(format_size(rm_size, BINARY)));
+        println!("Remove files: {} ({})", Red.paint(BinaryBytes(rm_size)), files.len());
 
         match Confirm::new(format!("Delete the above {} files?", files.len()).as_str())
             .with_default(true)
             .prompt() {
             Ok(true) => {
-                info!("Confirmed.");
+                println!("Confirmed.");
             }
             _ => {
-                info!("Aborted.");
+                println!("Aborted.");
                 return Ok(());
             }
         }
 
-        let header_span = info_span!("deletion");
-        header_span.pb_set_style(&ProgressStyle::default_bar());
-        header_span.pb_set_length(files.len() as u64);
-        header_span.pb_start();
-
-        let header_span_enter = header_span.enter();
+        let progress = ProgressBar::new(files.len() as u64);
+        progress.set_style(ProgressStyle::default_bar()
+            .template("{prefix} [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%)\n{msg}")?);
+        progress.set_prefix("Processing");
 
         let mut dirs = Vec::new();
         for entry in &files {
@@ -177,8 +156,9 @@ fn main() -> anyhow::Result<()> {
                 dirs.push(entry);
             } else {
                 // fs::remove_file(&entry)?;
-                info!("Removed file: {}", entry.to_string_lossy());
-                header_span.pb_inc(1);
+                progress.set_message(truncate_message(
+                    format!("Removed file: {}", entry.to_string_lossy())));
+                progress.inc(1);
             }
         }
 
@@ -186,16 +166,17 @@ fn main() -> anyhow::Result<()> {
         dirs.reverse(); // Subdirectories go first
         for entry in dirs {
             // fs::remove_dir(entry)?;
-            info!("Removed directory: {}", entry.to_string_lossy());
-            header_span.pb_inc(1);
+            progress.set_message(truncate_message(
+                format!("Removed directory: {}", entry.to_string_lossy())));
+            progress.inc(1);
         }
 
-        drop(header_span_enter);
-        drop(header_span);
-        info!("{} entries removed.", files.len());
+        progress.set_prefix("Done");
+        progress.set_message(format!("{} entries removed.", files.len()));
+        progress.finish();
     }
 
-    info!("Operation completed successfully.");
+    println!("Operation completed successfully.");
     Ok(())
 }
 
@@ -210,4 +191,11 @@ pub fn absolute_path(path: impl AsRef<Path>) -> io::Result<PathBuf> {
     }.clean();
 
     Ok(absolute_path)
+}
+
+fn truncate_message(message: String) -> String {
+    if let Some((width, _)) = term_size::dimensions() {
+        return format!("{}...", message.unicode_truncate(width.saturating_sub(10)).0)
+    }
+    message.to_string()
 }
