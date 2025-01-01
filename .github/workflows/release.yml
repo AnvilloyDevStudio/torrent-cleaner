@@ -23,7 +23,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get install libssl3 libssl-dev
+      - name:  Install # Source: https://stackoverflow.com/a/57948488
+        run: |
+          if [ "$RUNNER_OS" == "Linux" ]; then
+            sudo apt-get install libssl3 libssl-dev
+          fi
+        shell: bash
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           # (required) Comma-separated list of binary names (non-extension portion of filename) to build and upload.
