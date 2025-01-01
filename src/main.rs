@@ -9,15 +9,16 @@ extern crate core;
 pub mod torrent;
 
 use crate::torrent::parse_torrent;
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use clap::{arg, command, value_parser, Arg, ArgAction, Command};
 use indicatif::{BinaryBytes, ProgressBar, ProgressStyle};
 use inquire::Confirm;
 use path_clean::PathClean;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Display, Path, PathBuf};
 use std::time::Duration;
-use std::{env, io, thread};
+use std::{env, fs, io};
 use term_painter::Color::{Blue, Green, NotSet, Red};
 use term_painter::{Painted, ToStyle};
 use unicode_truncate::UnicodeTruncateStr;
@@ -30,7 +31,8 @@ fn main() -> anyhow::Result<()> {
             .required(false)
             .action(ArgAction::SetTrue))
         .arg(arg!(-d --"no-confirm" "Skip confirmation before deleting files")
-            .required(false))
+            .required(false)
+            .action(ArgAction::SetTrue))
         .arg(Arg::new("file")
             .help("Specify the .torrent file; must be a multi-file torrent")
             .required(true)
@@ -46,6 +48,8 @@ fn main() -> anyhow::Result<()> {
 
     let path = absolute_path(matches.get_one::<PathBuf>("file").expect("required"))?;
     let dir = absolute_path(matches.get_one::<PathBuf>("dir").expect("required"))?;
+    let include_sur = matches.get_flag("surface");
+    let no_confirm = matches.get_flag("no-confirm");
 
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(ProgressStyle::default_spinner()
@@ -54,29 +58,34 @@ fn main() -> anyhow::Result<()> {
     spinner.set_message("Parsing...");
     spinner.enable_steady_tick(Duration::from_millis(100));
 
-    let result = parse_torrent(path);
+    let result = parse_torrent(&spinner, path);
     spinner.finish_and_clear();
     drop(spinner);
     let torrent = result?;
     println!("Parsing completed.\n");
 
     let mut files = HashMap::new();
+    let mut surface_files = HashSet::new();
     if let Some(vec) = torrent.info.files {
         for f in vec.iter() {
             files.insert(PathBuf::from_iter(f.path.iter().map(|e| e.to_string()))
                 .into_boxed_path(), f.length);
+            surface_files.insert(OsString::from(
+                f.path.first().ok_or(anyhow!("Empty path"))?.to_string()));
         }
     } else {
-        return Err(anyhow::anyhow!("Not a valid multi-file torrent"));
+        return Err(anyhow!("Not a valid multi-file torrent"));
     }
 
     let mut old_files = Vec::new();
     let mut rm_size: u64 = 0;
     for entry in WalkDir::new(&dir) {
         let entry = entry.context("Failed to read directory contents")?;
+        if entry.depth() == 0 { continue; }
         let path = entry.path().strip_prefix(&dir).with_context(||
             format!("Failed to strip directory contents of {:?}", &dir))?;
-        if !files.contains_key(path) {
+        if (include_sur || surface_files.contains(path.components().next().expect("Not empty")
+            .as_os_str())) && !files.contains_key(path) {
             let meta = entry.metadata()?;
             if meta.is_file() {
                 rm_size += meta.len();
@@ -110,7 +119,7 @@ fn main() -> anyhow::Result<()> {
             println!("{}  {}", Red.paint(match entry.is_dir() {
                 true => "-d",
                 false => "-f",
-            }), path_colored(&entry));
+            }), path_colored(entry));
         }
 
         for entry in new_files.iter() {
@@ -119,7 +128,7 @@ fn main() -> anyhow::Result<()> {
 
         println!();
         println!("New files: {} ({})", Green.paint(BinaryBytes(new_size)), new_files.len());
-        println!("Remove files: {} ({})", Red.paint(BinaryBytes(rm_size)), old_files.len());
+        println!("Remove entries: {} ({})", Red.paint(BinaryBytes(rm_size)), old_files.len());
     } else { // Delete files
         let files = old_files;
         println!("Existed files found:");
@@ -131,17 +140,18 @@ fn main() -> anyhow::Result<()> {
         }
 
         println!();
-        println!("Remove files: {} ({})", Red.paint(BinaryBytes(rm_size)), files.len());
+        println!("Remove entries: {} ({})", Red.paint(BinaryBytes(rm_size)), files.len());
 
-        match Confirm::new(format!("Delete the above {} files?", files.len()).as_str())
-            .with_default(true)
-            .prompt() {
-            Ok(true) => {
-                println!("Confirmed.");
-            }
-            _ => {
-                println!("Aborted.");
-                return Ok(());
+        if !no_confirm {
+            match Confirm::new(format!("Delete the above {} files?", files.len()).as_str())
+                .with_default(true).prompt() {
+                Ok(true) => {
+                    println!("Confirmed.");
+                }
+                _ => {
+                    println!("Aborted.");
+                    return Ok(());
+                }
             }
         }
 
@@ -155,7 +165,7 @@ fn main() -> anyhow::Result<()> {
             if entry.is_dir() {
                 dirs.push(entry);
             } else {
-                // fs::remove_file(&entry)?;
+                fs::remove_file(entry)?;
                 progress.set_message(truncate_message(
                     format!("Removed file: {}", entry.to_string_lossy())));
                 progress.inc(1);
@@ -165,7 +175,7 @@ fn main() -> anyhow::Result<()> {
         dirs.sort();
         dirs.reverse(); // Subdirectories go first
         for entry in dirs {
-            // fs::remove_dir(entry)?;
+            fs::remove_dir(entry)?;
             progress.set_message(truncate_message(
                 format!("Removed directory: {}", entry.to_string_lossy())));
             progress.inc(1);
