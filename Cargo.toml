@@ -1,6 +1,6 @@
 [package]
 name = "torrent-cleaner"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Torrent Cleaner commandline tool"
 authors = ["Ben Forge (BenCheung0422)"]
